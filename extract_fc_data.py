@@ -23,7 +23,7 @@ while True:
 
     mtype = msg.get_type()
 
-    if mtype == "RAW_IMU":
+    if mtype == "LOCAL_POSITION_NED":
         print("-"*20)
         if msg:
             print("Message type:", msg.get_type())     # e.g. RAW_IMU, ATTITUDE
@@ -31,10 +31,10 @@ while True:
             for field in msg.get_fieldnames():
                 print(field, ":", getattr(msg, field))
         
-    elif mtype == "ATTITUDE":
-        print("-"*20)
-        if msg:
-            print("Message type:", msg.get_type())     # e.g. RAW_IMU, ATTITUDE
-            print("Fields:", msg.get_fieldnames())     # list of field names
-            for field in msg.get_fieldnames():
-                print(field, ":", getattr(msg, field))
+    # elif mtype == "ATTITUDE":
+    #     print("-"*20)
+    #     if msg:
+    #         print("Message type:", msg.get_type())     # e.g. RAW_IMU, ATTITUDE
+    #         print("Fields:", msg.get_fieldnames())     # list of field names
+    #         for field in msg.get_fieldnames():
+    #             print(field, ":", getattr(msg, field))

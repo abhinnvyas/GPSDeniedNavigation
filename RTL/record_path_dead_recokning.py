@@ -14,7 +14,7 @@ path = []  # list to store waypoints
 # MAVLink Connection
 # =====================
 print("Connecting to drone...")
-master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
+master = mavutil.mavlink_connection('/dev/ttyACM0', baud=57600)
 master.wait_heartbeat()
 print("Connected to system:", master.target_system, " component:", master.target_component)
 

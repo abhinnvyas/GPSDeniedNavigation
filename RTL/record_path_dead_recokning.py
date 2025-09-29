@@ -1,105 +1,96 @@
-from pymavlink import mavutil
-from scipy.spatial.transform import Rotation as R
-import numpy as np
-import math
 import time
+import numpy as np
+from pymavlink import mavutil
 
-# ========================
-# CONFIG
-# ========================
-GRAVITY = 9.81   # m/s^2
-SAVE_FILE = "path.npy"
-
-# ========================
-# STATE VARIABLES
-# ========================
-pos = np.zeros(3)   # [x, y, z]
-vel = np.zeros(3)   # [vx, vy, vz]
-path = []           # trajectory log
+# =====================
+# Global Variables
+# =====================
 last_t = None
+pos = np.array([0.0, 0.0, 0.0])  # x, y, z position in meters
+vel = np.array([0.0, 0.0, 0.0])  # velocity in m/s
+path = []  # list to store waypoints
 
-# ========================
-# Helper conversion functions
-# ========================
-def parse_raw_imu(msg):
-    # accel in m/s^2
-    ax = msg.xacc * 9.81 / 1000.0
-    ay = msg.yacc * 9.81 / 1000.0
-    az = msg.zacc * 9.81 / 1000.0
-    return np.array([ax, ay, az])
-
-def parse_attitude(msg):
-    # Roll, Pitch, Yaw in radians
-    return msg.roll, msg.pitch, msg.yaw
-
-# ========================
-# Connect to Pixhawk
-# ========================
-master = mavutil.mavlink_connection('/dev/ttyACM0', baud=57600)
+# =====================
+# MAVLink Connection
+# =====================
+print("Connecting to drone...")
+master = mavutil.mavlink_connection('udp:127.0.0.1:14550')
 master.wait_heartbeat()
-print("✅ Connected to system:", master.target_system, master.target_component)
+print("Connected to system:", master.target_system, " component:", master.target_component)
 
-# Request data stream at 50Hz
-master.mav.request_data_stream_send(
-    master.target_system,
-    master.target_component,
-    mavutil.mavlink.MAV_DATA_STREAM_ALL,
-    50,   # Hz
-    1     # start
-)
+# =====================
+# Functions
+# =====================
+def update_position(msg):
+    """
+    Update position using GPS (when available).
+    """
+    global pos, path
+    lat = msg.lat / 1e7
+    lon = msg.lon / 1e7
+    alt = msg.alt / 1000.0
+    pos = np.array([lat, lon, alt])
+    path.append(pos.copy())
 
-# Buffers for latest data
-latest_acc = None
-latest_att = None
 
-print("🚁 Starting INS integration (press CTRL+C to stop)...")
+def dead_reckoning(msg):
+    """
+    Update position using IMU dead reckoning when GPS is lost.
+    """
+    global last_t, pos, vel, path
 
+    # Ensure globals are declared at top
+    global last_t, pos, vel
+
+    # Extract IMU data
+    ax = msg.xacc / 1000.0  # acceleration (m/s^2)
+    ay = msg.yacc / 1000.0
+    az = msg.zacc / 1000.0
+
+    t = time.time()
+    if last_t is None:
+        last_t = t
+        return
+
+    dt = t - last_t
+    last_t = t
+
+    # Integrate acceleration → velocity
+    vel[0] += ax * dt
+    vel[1] += ay * dt
+    vel[2] += az * dt
+
+    # Integrate velocity → position
+    pos[0] += vel[0] * dt
+    pos[1] += vel[1] * dt
+    pos[2] += vel[2] * dt
+
+    path.append(pos.copy())
+
+
+def save_path():
+    np.save("path.npy", np.array(path))
+    print("Saved", len(path), "waypoints to path.npy")
+
+
+# =====================
+# Main Loop
+# =====================
 try:
     while True:
         msg = master.recv_match(blocking=True)
+
         if not msg:
             continue
 
-        mtype = msg.get_type()
+        msg_type = msg.get_type()
 
-        if mtype == "RAW_IMU":
-            latest_acc = parse_raw_imu(msg)
+        if msg_type == "GLOBAL_POSITION_INT":  # GPS available
+            update_position(msg)
 
-        elif mtype == "ATTITUDE":
-            latest_att = parse_attitude(msg)
-
-        # If we have both IMU and attitude, integrate
-        if latest_acc is not None and latest_att is not None:
-            now = time.time()
-            global last_t, pos, vel
-
-            if last_t is None:
-                last_t = now
-                continue
-
-            dt = now - last_t
-            last_t = now
-
-            roll, pitch, yaw = latest_att
-
-            # Rotation: body → world
-            rot = R.from_euler('xyz', [roll, pitch, yaw])
-            acc_world = rot.apply(latest_acc)
-
-            # Subtract gravity
-            acc_world[2] -= GRAVITY
-
-            # Integrate accel → vel → pos
-            vel += acc_world * dt
-            pos += vel * dt
-
-            # Save trajectory point
-            path.append([pos[0], pos[1], pos[2], yaw])
-
-            # Print debug
-            print(f"t={now:.2f}  pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})  yaw={math.degrees(yaw):.1f}°")
+        elif msg_type == "RAW_IMU":  # Use IMU for dead reckoning
+            dead_reckoning(msg)
 
 except KeyboardInterrupt:
-    print("⏹ Stopping... saving trajectory.")
-    np.save(SAVE_FILE, np.array(path))
-    print(f"💾 Saved {len(path)} waypoints to {SAVE_FILE}")
+    print("Stopping recording...")
+    save_path()

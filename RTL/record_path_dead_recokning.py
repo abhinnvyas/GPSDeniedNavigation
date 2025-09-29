@@ -1,64 +1,105 @@
-import numpy as np
-import pandas as pd
+from pymavlink import mavutil
 from scipy.spatial.transform import Rotation as R
+import numpy as np
+import math
+import time
 
 # ========================
 # CONFIG
 # ========================
-GRAVITY = 9.81  # m/s^2
+GRAVITY = 9.81   # m/s^2
+SAVE_FILE = "path.npy"
 
-# ------------------------
-# Load your data
-# Assume CSV or JSON converted to DataFrame with columns:
-# time_usec, xacc, yacc, zacc, roll, pitch, yaw
-# ------------------------
-df = pd.read_csv("imu_attitude_log.csv")
+# ========================
+# STATE VARIABLES
+# ========================
+pos = np.zeros(3)   # [x, y, z]
+vel = np.zeros(3)   # [vx, vy, vz]
+path = []           # trajectory log
+last_t = None
 
-# Convert units
-df["time"] = df["time_usec"] * 1e-6              # µs → seconds
-df["ax"] = df["xacc"] * 9.81 / 1000.0            # mg → m/s^2
-df["ay"] = df["yacc"] * 9.81 / 1000.0
-df["az"] = df["zacc"] * 9.81 / 1000.0
+# ========================
+# Helper conversion functions
+# ========================
+def parse_raw_imu(msg):
+    # accel in m/s^2
+    ax = msg.xacc * 9.81 / 1000.0
+    ay = msg.yacc * 9.81 / 1000.0
+    az = msg.zacc * 9.81 / 1000.0
+    return np.array([ax, ay, az])
 
-# ------------------------
-# Initialize states
-# ------------------------
-pos = np.zeros(3)   # x,y,z
-vel = np.zeros(3)   # vx,vy,vz
-path = []           # store trajectory
+def parse_attitude(msg):
+    # Roll, Pitch, Yaw in radians
+    return msg.roll, msg.pitch, msg.yaw
 
-last_t = df["time"].iloc[0]
+# ========================
+# Connect to Pixhawk
+# ========================
+master = mavutil.mavlink_connection('/dev/ttyACM0', baud=57600)
+master.wait_heartbeat()
+print("✅ Connected to system:", master.target_system, master.target_component)
 
-for i, row in df.iterrows():
-    # Time delta
-    t = row["time"]
-    dt = t - last_t
-    if dt <= 0:
-        continue
-    last_t = t
+# Request data stream at 50Hz
+master.mav.request_data_stream_send(
+    master.target_system,
+    master.target_component,
+    mavutil.mavlink.MAV_DATA_STREAM_ALL,
+    50,   # Hz
+    1     # start
+)
 
-    # Body-frame acceleration
-    acc_body = np.array([row["ax"], row["ay"], row["az"]])
+# Buffers for latest data
+latest_acc = None
+latest_att = None
 
-    # Rotation from attitude (roll,pitch,yaw)
-    rot = R.from_euler('xyz', [row["roll"], row["pitch"], row["yaw"]])
-    acc_world = rot.apply(acc_body)
+print("🚁 Starting INS integration (press CTRL+C to stop)...")
 
-    # Remove gravity
-    acc_world[2] -= GRAVITY
+try:
+    while True:
+        msg = master.recv_match(blocking=True)
+        if not msg:
+            continue
 
-    # Integrate acceleration → velocity
-    vel += acc_world * dt
+        mtype = msg.get_type()
 
-    # Integrate velocity → position
-    pos += vel * dt
+        if mtype == "RAW_IMU":
+            latest_acc = parse_raw_imu(msg)
 
-    # Store (x, y, z, yaw)
-    path.append([pos[0], pos[1], pos[2], row["yaw"]])
+        elif mtype == "ATTITUDE":
+            latest_att = parse_attitude(msg)
 
-# Convert to array
-path = np.array(path)
+        # If we have both IMU and attitude, integrate
+        if latest_acc is not None and latest_att is not None:
+            now = time.time()
+            global last_t, pos, vel
 
-# Save path
-np.save("path.npy", path)
-print(f"Saved {len(path)} waypoints to path.npy")
+            if last_t is None:
+                last_t = now
+                continue
+
+            dt = now - last_t
+            last_t = now
+
+            roll, pitch, yaw = latest_att
+
+            # Rotation: body → world
+            rot = R.from_euler('xyz', [roll, pitch, yaw])
+            acc_world = rot.apply(latest_acc)
+
+            # Subtract gravity
+            acc_world[2] -= GRAVITY
+
+            # Integrate accel → vel → pos
+            vel += acc_world * dt
+            pos += vel * dt
+
+            # Save trajectory point
+            path.append([pos[0], pos[1], pos[2], yaw])
+
+            # Print debug
+            print(f"t={now:.2f}  pos=({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})  yaw={math.degrees(yaw):.1f}°")
+
+except KeyboardInterrupt:
+    print("⏹ Stopping... saving trajectory.")
+    np.save(SAVE_FILE, np.array(path))
+    print(f"💾 Saved {len(path)} waypoints to {SAVE_FILE}")

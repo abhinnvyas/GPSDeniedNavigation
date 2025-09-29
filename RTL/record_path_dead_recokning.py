@@ -32,6 +32,8 @@ def update_position(msg):
     pos = np.array([lat, lon, alt])
     path.append(pos.copy())
 
+    print(f"[GPS] Waypoint {len(path)}: {pos}")
+
 
 def dead_reckoning(msg):
     """
@@ -39,10 +41,6 @@ def dead_reckoning(msg):
     """
     global last_t, pos, vel, path
 
-    # Ensure globals are declared at top
-    global last_t, pos, vel
-
-    # Extract IMU data
     ax = msg.xacc / 1000.0  # acceleration (m/s^2)
     ay = msg.yacc / 1000.0
     az = msg.zacc / 1000.0
@@ -66,6 +64,8 @@ def dead_reckoning(msg):
     pos[2] += vel[2] * dt
 
     path.append(pos.copy())
+
+    print(f"[DR] Waypoint {len(path)}: {pos}")
 
 
 def save_path():
